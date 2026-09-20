@@ -1,0 +1,10 @@
+{
+  "candidates": [
+    {"name": "reference", "bands": [230, 320, 450]},
+    {"name": "variant_del100", "bands": [200, 500]},
+    {"name": "variant_ins250", "bands": [250, 320, 450, 700]}
+  ],
+  "observed_bands": [202, 231, 318, 455, 502],
+  "band_match_tolerance": 10,
+  "max_components": 2
+}

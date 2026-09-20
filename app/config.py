@@ -17,5 +17,8 @@ class Settings:
     # panel 接口允许的最大变异型数量：最小面板为精确集合覆盖，规模随变异数指数增长
     MAX_VARIANTS: int = int(os.getenv("MAX_VARIANTS", "16"))
 
+    # mixture 接口允许的最大候选数量：子集枚举规模随候选数指数增长
+    MAX_MIXTURE_CANDIDATES: int = int(os.getenv("MAX_MIXTURE_CANDIDATES", "12"))
+
 
 settings = Settings()

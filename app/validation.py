@@ -6,7 +6,7 @@
 from fastapi import HTTPException
 
 from app.config import settings
-from app.models import DigestRequest, IdentifyRequest, PanelRequest
+from app.models import DigestRequest, IdentifyRequest, MixtureRequest, PanelRequest
 
 
 class DigestValidationError(HTTPException):
@@ -90,6 +90,63 @@ def validate_identify_request(req: IdentifyRequest) -> IdentifyRequest:
                 f"条带数量（{len(bands)}）超过允许上限 {settings.MAX_BANDS}",
                 "too_many_bands",
             ))
+    if errors:
+        raise DigestValidationError(errors)
+    return req
+
+
+def validate_mixture_request(req: MixtureRequest) -> MixtureRequest:
+    """mixture 接口的语义校验：候选数量上限、名称重复/空白、空候选与条带规模。
+
+    候选列表为空、观测为空、条带为负、容差或成分上限非法等基础字段约束由
+    Pydantic 模型直接拦截，与此处一样输出统一结构的 422 响应。
+    """
+    errors: list[dict] = []
+
+    if len(req.candidates) > settings.MAX_MIXTURE_CANDIDATES:
+        errors.append(_err(
+            ["candidates"],
+            f"候选数量（{len(req.candidates)}）超过允许上限 {settings.MAX_MIXTURE_CANDIDATES}",
+            "too_many_candidates",
+        ))
+
+    seen_names: set[str] = set()
+    for i, candidate in enumerate(req.candidates):
+        name = candidate.name
+        if not name.strip():
+            errors.append(_err(
+                ["candidates", i, "name"],
+                "候选名称不可为空白",
+                "invalid_candidate_name",
+            ))
+        elif name in seen_names:
+            errors.append(_err(
+                ["candidates", i, "name"],
+                f"候选名称重复：{name}",
+                "duplicate_candidate_name",
+            ))
+        seen_names.add(name)
+
+        if not candidate.bands:
+            errors.append(_err(
+                ["candidates", i, "bands"],
+                f"候选 {name} 的预测条带列表为空：每个候选至少 1 条",
+                "empty_candidate_bands",
+            ))
+        elif len(candidate.bands) > settings.MAX_BANDS:
+            errors.append(_err(
+                ["candidates", i, "bands"],
+                f"候选 {name} 的条带数量（{len(candidate.bands)}）超过允许上限 {settings.MAX_BANDS}",
+                "too_many_bands",
+            ))
+
+    if len(req.observed_bands) > settings.MAX_BANDS:
+        errors.append(_err(
+            ["observed_bands"],
+            f"条带数量（{len(req.observed_bands)}）超过允许上限 {settings.MAX_BANDS}",
+            "too_many_bands",
+        ))
+
     if errors:
         raise DigestValidationError(errors)
     return req

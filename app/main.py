@@ -9,12 +9,15 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.digest import recommend
 from app.identify import identify
+from app.mixture import resolve_mixture
 from app.models import (
     DigestRequest,
     DigestResponse,
     HealthResponse,
     IdentifyRequest,
     IdentifyResponse,
+    MixtureRequest,
+    MixtureResponse,
     PanelRequest,
     PanelResponse,
 )
@@ -22,11 +25,12 @@ from app.panel import build_panel
 from app.validation import (
     DigestValidationError,
     validate_identify_request,
+    validate_mixture_request,
     validate_panel_request,
     validate_request,
 )
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 app = FastAPI(
     title="Circular DNA Double-Digest Discrimination Service",
@@ -35,7 +39,9 @@ app = FastAPI(
         "参考型与变异型的片段长度，按分辨容差聚类条带，并推荐可区分两种样本的酶对；"
         "也可将一次凝胶观测条带与两种样本的预测条带做一对一最小代价匹配，"
         "判定观测样本为参考型、变异型或无法区分；还可针对多个变异型精确求出"
-        "覆盖全部变异型的最小酶对面板（非贪心近似）。"
+        "覆盖全部变异型的最小酶对面板（非贪心近似）；并可枚举不超过成分上限的"
+        "候选子集解析混合样本：共迁移聚带后复用一对一最小代价匹配，"
+        "按未匹配条带数、总误差、成分数与候选名字典序选出唯一成分组合。"
     ),
     version=VERSION,
 )
@@ -98,6 +104,17 @@ async def digest_identify(req: IdentifyRequest) -> IdentifyResponse:
 async def digest_panel(req: PanelRequest) -> PanelResponse:
     validate_panel_request(req)
     return build_panel(req)
+
+
+@app.post(
+    "/api/v1/digest/mixture",
+    response_model=MixtureResponse,
+    tags=["digest"],
+    summary="枚举候选子集解析混合样本：共迁移聚带后复用一对一最小代价匹配，选出唯一成分组合",
+)
+async def digest_mixture(req: MixtureRequest) -> MixtureResponse:
+    validate_mixture_request(req)
+    return resolve_mixture(req)
 
 
 if __name__ == "__main__":

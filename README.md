@@ -1,10 +1,11 @@
 # 环状 DNA 双酶切鉴别服务
 
-基于 FastAPI 的圆形（环状）DNA 双酶切鉴别服务，提供三个互补接口：
+基于 FastAPI 的圆形（环状）DNA 双酶切鉴别服务，提供四个互补接口：
 
 - **方案推荐**：客户端提交质粒长度、参考型与变异型的候选酶切位点、最小可见片段长度和条带分辨容差，服务枚举所有不同酶对，按圆环相邻切点计算两种样本的片段长度，将容差内的片段聚为同一条电泳条带，并推荐能够区分两种样本的酶对。
 - **样本鉴别**：客户端提交同一质粒参考型、变异型的预测条带长度和一次凝胶观测长度列表，服务在给定容差内做确定性的一对一最小代价匹配，分别计算两种样本的缺失条带、额外条带与总误差，判定观测样本为参考型、变异型或无法区分。
 - **最小酶对面板**：客户端提交质粒长度、可见阈值、分辨容差及酶列表（每种酶给出参考型切点和按变异名映射的变异型切点），服务复用同一套圆环酶切与聚带规则评估每个酶对对每个变异型的可区分条带，并**精确**求出覆盖全部变异型的最小酶对面板（非贪心近似）。
+- **混合样本解析**：客户端提交若干命名候选的预测条带、一次凝胶观测条带、匹配容差和成分数上限，服务枚举每个不超过上限的候选子集，先把子集内预测条带按容差做单连接聚带（共迁移条带只出现一次，代表长度取均值），再复用一对一最小代价匹配与观测比对，按未匹配条带总数、总误差、成分数与候选名字典序选出唯一的成分组合。
 
 **核心功能为纯本地数学计算，不依赖数据库、缓存或任何外部服务。**
 
@@ -43,6 +44,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | 双酶切方案推荐 | POST | `http://localhost:8000/api/v1/digest/recommend` |
 | 凝胶条带样本鉴别 | POST | `http://localhost:8000/api/v1/digest/identify` |
 | 最小酶对面板 | POST | `http://localhost:8000/api/v1/digest/panel` |
+| 混合样本解析 | POST | `http://localhost:8000/api/v1/digest/mixture` |
 | 交互式 API 文档（Swagger） | GET | `http://localhost:8000/docs` |
 | OpenAPI Schema | GET | `http://localhost:8000/openapi.json` |
 
@@ -50,7 +52,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ```bash
 curl http://localhost:8000/health
-# {"status":"ok","service":"circular-dna-digest","version":"1.2.0"}
+# {"status":"ok","service":"circular-dna-digest","version":"1.3.0"}
 ```
 
 ---
@@ -67,6 +69,7 @@ curl http://localhost:8000/health
 | `MAX_ENZYMES` | `64` | 单次请求允许的最大酶数量（酶对数为 C(n,2)） | 编辑 `environment` |
 | `MAX_BANDS` | `512` | identify 接口每个条带列表允许的最大条带数 | 编辑 `environment` |
 | `MAX_VARIANTS` | `16` | panel 接口允许的最大变异型数量（最小面板为精确集合覆盖，规模随变异数指数增长） | 编辑 `environment` |
+| `MAX_MIXTURE_CANDIDATES` | `12` | mixture 接口允许的最大候选数量（子集枚举规模随候选数指数增长） | 编辑 `environment` |
 
 ---
 
@@ -147,6 +150,41 @@ curl -X POST http://localhost:8000/api/v1/digest/identify \
   - `missing_bands` / `extra_bands`：缺失、额外条带长度列表（升序）。
 - `verdict`：`reference` / `variant` / `ambiguous`；`verdict_reason` 为中文判定依据，可完全由响应中的计数与总误差复算。
 
+### 混合样本解析（POST `/api/v1/digest/mixture`）
+
+#### 请求体（JSON）
+
+| 字段 | 类型 | 约束 |
+| --- | --- | --- |
+| `candidates` | array | 命名候选列表，**至少 1 个**且不超过 `MAX_MIXTURE_CANDIDATES`（默认 12），名称不可重复 |
+| `candidates[].name` | string | 候选名称，不可为空白 |
+| `candidates[].bands` | number[] | 该候选的预测条带长度（bp），每条 ≥ 0，**至少 1 条** |
+| `observed_bands` | number[] | 一次凝胶观测到的条带长度（bp），每条 ≥ 0，**至少 1 条** |
+| `band_match_tolerance` | number | ≥ 0，条带匹配容差（bp），共迁移聚带与预测/观测配对共用 |
+| `max_components` | int | ≥ 1，混合样本允许的最大成分数（候选子集规模上限）；超过候选数量时按候选数量计 |
+
+请求示例见 [`examples/mixture-request.json`](examples/mixture-request.json)：
+
+```bash
+curl -X POST http://localhost:8000/api/v1/digest/mixture \
+  -H 'Content-Type: application/json' \
+  -d @examples/mixture-request.json
+```
+
+#### 算法说明（混合样本解析）
+
+1. **枚举子集**：枚举全部成分数不超过 `max_components` 的候选子集，数量为 `C(n,1) + … + C(n,k)`（n 为候选数，k 为成分上限）。
+2. **共迁移聚带**：把子集内全部候选的预测条带合并排序，相邻长度差 ≤ 匹配容差时归入同一条带（单连接聚类，与推荐接口同一规则）——共迁移条带只出现一次，条带代表长度取成员长度均值（保留两位小数）。
+3. **复用匹配**：对每个子集，复用鉴别接口的一对一最小代价匹配，将合并预测条带与观测条带配对，统计未匹配条带数（缺失 + 额外）与总误差。
+4. **唯一选定**：全部子集按 **未匹配条带总数升序 → 总误差升序 → 成分数升序 → 候选名列表字典序** 的固定顺序比较，首个即为结果；候选名互不相同保证排序键唯一，结果与候选的提交顺序无关。
+
+#### 响应要点（混合样本解析）
+
+- `selected_components`：选中成分名称（按字典序）。
+- `merged_predicted_bands`：选中成分共迁移聚带后的合并预测条带代表长度（升序）。
+- `match`：合并预测条带与观测条带的匹配结果，结构与鉴别接口的样本结果一致——`matched_count` / `missing_count` / `extra_count` / `total_error`、逐条匹配依据 `matches`、缺失条带 `missing_bands` 与额外条带 `extra_bands`。
+- `evaluated_subset_count`：实际评估的候选子集数量；`selection_reason` 为中文选择依据，可由响应中的计数与总误差复算。
+
 ### 最小酶对面板（POST `/api/v1/digest/panel`）
 
 #### 请求体（JSON）
@@ -209,6 +247,14 @@ curl -X POST http://localhost:8000/api/v1/digest/panel \
 - 各酶的变异名集合不一致、变异名为空白、未定义任何变异型、变异型数量超过 `MAX_VARIANTS` 上限；
 - 质粒长度 ≤ 0、最小可见片段 ≥ 质粒长度、容差为负等字段约束错误。
 
+混合样本解析接口（`/api/v1/digest/mixture`）：
+
+- 候选列表为空、任一候选名称为空白或重复、任一候选的预测条带列表为空；
+- 候选数量超过 `MAX_MIXTURE_CANDIDATES`（默认 12）上限；
+- `max_components` 缺失、小于 1 或非整数；
+- 观测条带列表为空、任一条带长度为负、匹配容差为负或缺失；
+- 任一条带列表超过 `MAX_BANDS` 上限。
+
 注意：推荐接口中切点不足两个属于**酶对级别**的拒绝（记录在 `rejected_pairs`，HTTP 200），而非请求级别错误；面板接口中某变异型无可用酶对时同样返回 HTTP 200（列入 `uncovered_variants`，不返回部分面板）。
 
 ---
@@ -218,17 +264,19 @@ curl -X POST http://localhost:8000/api/v1/digest/panel \
 ```
 .
 ├── app/
-│   ├── main.py          # FastAPI 入口：健康检查、推荐/鉴别/面板路由、统一 422 处理
+│   ├── main.py          # FastAPI 入口：健康检查、推荐/鉴别/面板/混合样本解析路由、统一 422 处理
 │   ├── models.py        # 请求/响应 Pydantic 模型
-│   ├── validation.py    # 越界、重复位点、变异名一致性、条带规模等语义校验
+│   ├── validation.py    # 越界、重复位点、变异名一致性、候选与条带规模等语义校验
 │   ├── digest.py        # 圆环片段、条带聚类、酶对枚举与排序（纯函数）
 │   ├── identify.py      # 条带一对一最小代价匹配与样本判定（纯函数）
 │   ├── panel.py         # 逐变异评估与精确最小酶对面板（纯函数）
+│   ├── mixture.py       # 混合样本解析：候选子集枚举、共迁移聚带与最优子集选定（纯函数）
 │   └── config.py        # 环境变量配置（均有默认值）
 ├── tests/               # pytest 单元 + API 端到端测试
 ├── examples/request.json
 ├── examples/identify-request.json
 ├── examples/panel-request.json
+├── examples/mixture-request.json
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt

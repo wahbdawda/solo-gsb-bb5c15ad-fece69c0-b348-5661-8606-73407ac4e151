@@ -16,6 +16,8 @@ services:
       MAX_BANDS: "512"
       # panel 接口允许的最大变异型数量（最小面板为精确集合覆盖）
       MAX_VARIANTS: "16"
+      # mixture 接口允许的最大候选数量（子集枚举规模随候选数指数增长）
+      MAX_MIXTURE_CANDIDATES: "12"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import os,sys,urllib.request; port=os.getenv('APP_PORT','8000'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=3).status==200 else 1)"]
