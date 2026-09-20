@@ -1,10 +1,11 @@
 # 环状 DNA 双酶切鉴别服务
 
-基于 FastAPI 的圆形（环状）DNA 双酶切鉴别服务，提供三个互补接口：
+基于 FastAPI 的圆形（环状）DNA 双酶切鉴别服务，提供四个互补接口：
 
 - **方案推荐**：客户端提交质粒长度、参考型与变异型的候选酶切位点、最小可见片段长度和条带分辨容差，服务枚举所有不同酶对，按圆环相邻切点计算两种样本的片段长度，将容差内的片段聚为同一条电泳条带，并推荐能够区分两种样本的酶对。
 - **样本鉴别**：客户端提交同一质粒参考型、变异型的预测条带长度和一次凝胶观测长度列表，服务在给定容差内做确定性的一对一最小代价匹配，分别计算两种样本的缺失条带、额外条带与总误差，判定观测样本为参考型、变异型或无法区分。
 - **最小酶对面板**：客户端提交质粒长度、可见阈值、分辨容差及酶列表（每种酶给出参考型切点和按变异名映射的变异型切点），服务复用同一套圆环酶切与聚带规则评估每个酶对对每个变异型的可区分条带，并**精确**求出覆盖全部变异型的最小酶对面板（非贪心近似）。
+- **混合样本解析**：客户端提交若干**命名候选成分**各自的预测条带、一次混合样本观测条带、匹配容差与成分数上限，服务枚举不超过上限的全部候选子集，先把每个子集的预测条带按容差做单连接聚带（共迁移条带只出现一次、代表长度取均值），再复用鉴别接口的一对一最小代价匹配，按未匹配条带数、总误差、成分数、候选名列表字典序唯一选定最吻合的成分组合。
 
 **核心功能为纯本地数学计算，不依赖数据库、缓存或任何外部服务。**
 
@@ -43,6 +44,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | 双酶切方案推荐 | POST | `http://localhost:8000/api/v1/digest/recommend` |
 | 凝胶条带样本鉴别 | POST | `http://localhost:8000/api/v1/digest/identify` |
 | 最小酶对面板 | POST | `http://localhost:8000/api/v1/digest/panel` |
+| 混合样本解析 | POST | `http://localhost:8000/api/v1/digest/mixture` |
 | 交互式 API 文档（Swagger） | GET | `http://localhost:8000/docs` |
 | OpenAPI Schema | GET | `http://localhost:8000/openapi.json` |
 
@@ -50,7 +52,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ```bash
 curl http://localhost:8000/health
-# {"status":"ok","service":"circular-dna-digest","version":"1.2.0"}
+# {"status":"ok","service":"circular-dna-digest","version":"1.3.0"}
 ```
 
 ---
@@ -65,8 +67,9 @@ curl http://localhost:8000/health
 | `APP_PORT` | `8000` | 容器内监听端口 | 编辑 `docker-compose.yml` 的 `environment` |
 | `HOST_PORT` | `8000` | 宿主机映射端口 | `HOST_PORT=9000 docker compose up --build -d` |
 | `MAX_ENZYMES` | `64` | 单次请求允许的最大酶数量（酶对数为 C(n,2)） | 编辑 `environment` |
-| `MAX_BANDS` | `512` | identify 接口每个条带列表允许的最大条带数 | 编辑 `environment` |
+| `MAX_BANDS` | `512` | identify / mixture 接口每个条带列表允许的最大条带数 | 编辑 `environment` |
 | `MAX_VARIANTS` | `16` | panel 接口允许的最大变异型数量（最小面板为精确集合覆盖，规模随变异数指数增长） | 编辑 `environment` |
+| `MAX_MIXTURE_CANDIDATES` | `12` | mixture 接口允许的最大候选成分数（需枚举至多该规模的全部子集） | 编辑 `environment` |
 
 ---
 
@@ -185,6 +188,68 @@ curl -X POST http://localhost:8000/api/v1/digest/panel \
 - `total_distinguishable_bands`：面板全部酶对的可区分条带总数。
 - **任一变异型无可用酶对时返回 HTTP 200**：该变异列入 `uncovered_variants`，且 `selected_pairs` 为空——**不返回部分面板**。
 
+### 混合样本解析（POST `/api/v1/digest/mixture`）
+
+#### 请求体（JSON）
+
+| 字段 | 类型 | 约束 |
+| --- | --- | --- |
+| `components` | array | 命名候选成分列表，**至少 1 个**候选，候选名不可重复，总数不超过 `MAX_MIXTURE_CANDIDATES`（默认 12） |
+| `components[].name` | string | 候选成分名（非空白），如 `strain-A` |
+| `components[].predicted_bands` | number[] | 该候选成分单独的预测条带长度（bp），每条 ≥ 0，**至少 1 条** |
+| `observed_bands` | number[] | 一次凝胶观测到的混合样本条带长度（bp），每条 ≥ 0，**至少 1 条** |
+| `band_match_tolerance` | number | ≥ 0，条带容差（bp）：同时用于共迁移聚带与预测/观测配对 |
+| `max_components` | int | ≥ 1 且 ≤ 候选总数；枚举成分数 1..该值的全部非空候选子集 |
+
+请求示例见 [`examples/mixture-request.json`](examples/mixture-request.json)：
+
+```bash
+curl -X POST http://localhost:8000/api/v1/digest/mixture \
+  -H 'Content-Type: application/json' \
+  -d @examples/mixture-request.json
+```
+
+#### 算法说明（混合）
+
+1. **枚举候选子集**：对成分数 1..`max_components` 的全部非空候选子集逐一评估（候选名按字典序规范化，结果与提交顺序无关）。
+2. **共迁移聚带（单连接）**：合并子集内各候选的预测条带（多重集），按长度升序扫描，相邻条带长度差 ≤ `band_match_tolerance` 即归入同一簇（链式可传递的单连接聚类）。**共迁移条带只出现一次**，无论它来自多个候选还是同一候选内的重复预测；每簇的**代表长度取簇内全部条带长度的均值**（保留两位小数）。
+3. **一对一最小代价匹配**：把合并预测条带与观测条带复用鉴别接口的同一套确定性匹配（先最大化匹配对数，再最小化总误差），得到逐条配对、缺失条带与额外条带。
+4. **唯一选定**：全部评估子集依次按 ① **未匹配条带总数**（缺失 + 额外）升序、② **总误差**升序、③ **成分数**升序、④ **排序后的候选名列表字典序**升序比较，次序④保证即使指标完全相同也有唯一结果。
+
+#### 响应示例（混合）
+
+```json
+{
+  "band_match_tolerance": 10.0,
+  "observed_band_count": 4,
+  "max_components": 2,
+  "selected_components": ["strain-A", "strain-B"],
+  "merged_predicted_bands": [230.0, 319.0, 455.0, 700.0],
+  "match": {
+    "predicted_band_count": 4,
+    "matched_count": 4,
+    "missing_count": 0,
+    "extra_count": 0,
+    "total_error": 3.0,
+    "matches": [
+      {"predicted_length": 230.0, "observed_length": 231.0, "error": 1.0, "description": "..."},
+      {"predicted_length": 319.0, "observed_length": 319.0, "error": 0.0, "description": "..."},
+      {"predicted_length": 455.0, "observed_length": 455.0, "error": 0.0, "description": "..."},
+      {"predicted_length": 700.0, "observed_length": 702.0, "error": 2.0, "description": "..."}
+    ],
+    "missing_bands": [],
+    "extra_bands": []
+  },
+  "evaluated_subset_count": 3,
+  "selection_reason": "在 3 个成分数不超过 2 的候选子集中，选定 ['strain-A', 'strain-B']（2 个成分）……"
+}
+```
+
+- `selected_components`：选中的候选成分名（字典序）；`merged_predicted_bands`：选中子集聚带后的代表长度（升序）。
+- `match`：与鉴别接口**完全同结构**——逐条匹配依据（按预测长度升序）、`missing_bands` / `extra_bands` 及各项计数与总误差。
+- `evaluated_subset_count`：实际评估的子集数，等于 `Σ C(候选数, k)`（k = 1..`max_components`）。
+- `selection_reason`：中文选定依据，说明四级比较次序如何决定唯一结果。
+
 ### 拒绝条件（HTTP 422）
 
 以下输入问题整体拒绝，返回统一结构 `{"code":"validation_failed","errors":[...]}`，一次性报告全部错误：
@@ -209,6 +274,15 @@ curl -X POST http://localhost:8000/api/v1/digest/panel \
 - 各酶的变异名集合不一致、变异名为空白、未定义任何变异型、变异型数量超过 `MAX_VARIANTS` 上限；
 - 质粒长度 ≤ 0、最小可见片段 ≥ 质粒长度、容差为负等字段约束错误。
 
+混合接口（`/api/v1/digest/mixture`）：
+
+- `max_components` 非法（缺失、非整数、< 1）或**超过候选成分总数**；
+- 候选成分名**重复**或为空白；候选列表为空；
+- 任一候选的 `predicted_bands` 为空（**空候选**），或观测列表为空；
+- 候选成分数超过 `MAX_MIXTURE_CANDIDATES`（默认 12）上限；
+- 任一条带长度为负数、容差为负 / 缺失 / 非数值等字段约束错误；
+- 任一条带列表超过 `MAX_BANDS` 上限。
+
 注意：推荐接口中切点不足两个属于**酶对级别**的拒绝（记录在 `rejected_pairs`，HTTP 200），而非请求级别错误；面板接口中某变异型无可用酶对时同样返回 HTTP 200（列入 `uncovered_variants`，不返回部分面板）。
 
 ---
@@ -218,17 +292,19 @@ curl -X POST http://localhost:8000/api/v1/digest/panel \
 ```
 .
 ├── app/
-│   ├── main.py          # FastAPI 入口：健康检查、推荐/鉴别/面板路由、统一 422 处理
+│   ├── main.py          # FastAPI 入口：健康检查、推荐/鉴别/面板/混合路由、统一 422 处理
 │   ├── models.py        # 请求/响应 Pydantic 模型
-│   ├── validation.py    # 越界、重复位点、变异名一致性、条带规模等语义校验
+│   ├── validation.py    # 越界、重复位点、变异名一致性、条带/候选规模等语义校验
 │   ├── digest.py        # 圆环片段、条带聚类、酶对枚举与排序（纯函数）
 │   ├── identify.py      # 条带一对一最小代价匹配与样本判定（纯函数）
 │   ├── panel.py         # 逐变异评估与精确最小酶对面板（纯函数）
+│   ├── mixture.py       # 混合样本共迁移聚带、子集枚举与最优子集选定（纯函数）
 │   └── config.py        # 环境变量配置（均有默认值）
 ├── tests/               # pytest 单元 + API 端到端测试
 ├── examples/request.json
 ├── examples/identify-request.json
 ├── examples/panel-request.json
+├── examples/mixture-request.json
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt

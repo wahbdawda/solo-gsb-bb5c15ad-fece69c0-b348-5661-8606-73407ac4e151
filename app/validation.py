@@ -6,7 +6,7 @@
 from fastapi import HTTPException
 
 from app.config import settings
-from app.models import DigestRequest, IdentifyRequest, PanelRequest
+from app.models import DigestRequest, IdentifyRequest, MixtureRequest, PanelRequest
 
 
 class DigestValidationError(HTTPException):
@@ -196,6 +196,69 @@ def validate_panel_request(req: PanelRequest) -> PanelRequest:
             ["enzymes"],
             f"变异型数量（{len(all_variants)}）超过允许上限 {settings.MAX_VARIANTS}",
             "too_many_variants",
+        ))
+
+    if errors:
+        raise DigestValidationError(errors)
+    return req
+
+
+def validate_mixture_request(req: MixtureRequest) -> MixtureRequest:
+    """mixture 接口的语义校验：候选规模/重名/空候选与成分数上限。
+
+    观测或候选条带为空、条带为负、容差非法或缺失、``max_components`` 缺失 /
+    小于 1 等基础字段约束由 Pydantic 模型直接拦截，与此处一样输出统一结构的
+    422 响应。
+    """
+    errors: list[dict] = []
+    candidate_count = len(req.components)
+
+    if candidate_count > settings.MAX_MIXTURE_CANDIDATES:
+        errors.append(_err(
+            ["components"],
+            f"候选成分数量（{candidate_count}）超过允许上限 "
+            f"{settings.MAX_MIXTURE_CANDIDATES}",
+            "too_many_mixture_candidates",
+        ))
+
+    seen_names: set[str] = set()
+    for i, component in enumerate(req.components):
+        name = component.name
+        if not name.strip():
+            errors.append(_err(
+                ["components", i, "name"],
+                "候选成分名不能为空白",
+                "invalid_component_name",
+            ))
+        if name in seen_names:
+            errors.append(_err(
+                ["components", i, "name"],
+                f"候选成分名重复：{name}",
+                "duplicate_component_name",
+            ))
+        seen_names.add(name)
+        if len(component.predicted_bands) > settings.MAX_BANDS:
+            errors.append(_err(
+                ["components", i, "predicted_bands"],
+                f"候选 {name} 的预测条带数量（{len(component.predicted_bands)}）"
+                f"超过允许上限 {settings.MAX_BANDS}",
+                "too_many_bands",
+            ))
+
+    if len(req.observed_bands) > settings.MAX_BANDS:
+        errors.append(_err(
+            ["observed_bands"],
+            f"条带数量（{len(req.observed_bands)}）超过允许上限 {settings.MAX_BANDS}",
+            "too_many_bands",
+        ))
+
+    # 成分数上限必须落在 [1, 候选总数]：为 0 / 负数 / 非整数由 Pydantic 拦截
+    if req.max_components > candidate_count:
+        errors.append(_err(
+            ["max_components"],
+            f"成分数上限（{req.max_components}）不能超过候选成分数量"
+            f"（{candidate_count}）",
+            "max_components_too_large",
         ))
 
     if errors:

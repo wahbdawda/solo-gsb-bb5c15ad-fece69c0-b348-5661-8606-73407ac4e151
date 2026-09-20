@@ -221,3 +221,50 @@ class PanelResponse(BaseModel):
         description="无任何可用酶对覆盖的变异名；非空时不返回部分面板"
     )
     total_distinguishable_bands: int = Field(description="面板全部酶对的可区分条带总数")
+
+
+# ---------------------------------------------------------------- 混合（mixture）模型
+
+class MixtureComponentInput(BaseModel):
+    name: str = Field(..., min_length=1, description="候选成分名（如某变异型 / 单菌编号）")
+    predicted_bands: list[NonNegativeBand] = Field(
+        ..., min_length=1, description="该候选成分单独的预测条带长度列表（bp），至少 1 条"
+    )
+
+
+class MixtureRequest(BaseModel):
+    components: list[MixtureComponentInput] = Field(
+        ..., min_length=1, description="命名候选成分列表，名称不可重复，至少 1 个候选"
+    )
+    observed_bands: list[NonNegativeBand] = Field(
+        ..., min_length=1, description="一次凝胶观测到的混合样本条带长度列表（bp），至少 1 条"
+    )
+    band_match_tolerance: NonNegativeBand = Field(
+        ...,
+        description="条带容差（bp）：既用于候选间共迁移条带的单连接聚带，"
+                    "也用于合并预测条带与观测条带的一对一配对",
+    )
+    max_components: int = Field(
+        ..., ge=1, description="成分数上限：枚举成分数不超过该值的全部候选子集，且不得超过候选总数"
+    )
+
+
+class MixtureResponse(BaseModel):
+    band_match_tolerance: float
+    observed_band_count: int
+    max_components: int
+    selected_components: list[str] = Field(
+        description="选中的候选成分名（成分数不超过上限的最优子集），按字典序"
+    )
+    merged_predicted_bands: list[float] = Field(
+        description="选中子集全部预测条带按容差单连接聚带后的代表长度（簇内均值），升序"
+    )
+    match: SampleMatchOut = Field(
+        description="合并预测条带与观测条带的一对一最小代价匹配结果（与鉴别接口同结构）"
+    )
+    evaluated_subset_count: int = Field(
+        description="实际评估的候选子集数量（成分数 1..max_components 的全部非空子集）"
+    )
+    selection_reason: str = Field(
+        description="中文选定依据：未匹配条带数、总误差、成分数及候选名列表如何决定唯一结果"
+    )
